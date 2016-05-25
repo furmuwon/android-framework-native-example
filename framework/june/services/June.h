@@ -57,7 +57,16 @@ public:
                                 uint32_t flags);
     virtual int Init(void);
     virtual String8 GetJuneServiceDesc(void);
+    virtual sp<IMemory> AllocMemory(int id, int size);
+    virtual status_t DumpMemory(int id, int size);
     virtual status_t DeInit(int id);
+
+    void LeaveTraceMemory(sp<IMemory> &iMem);
+private:
+    sp<MemoryDealer> mMemoryDealer;
+    DefaultKeyedVector< int, sp<IMemory> > mAllocedMemorys;
+    mutable Mutex mLock;
+    int unique_id;
 
 private:
     June() ANDROID_API;

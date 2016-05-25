@@ -24,6 +24,7 @@
 #include <utils/RefBase.h>
 #include <utils/Errors.h>
 #include <binder/IInterface.h>
+#include <binder/IMemory.h>
 #include <utils/String8.h>
 
 namespace android {
@@ -44,7 +45,9 @@ public:
 
 	virtual int Init(void) = 0;
 	virtual String8 GetJuneServiceDesc(void) = 0;
-	virtual status_t DeInit(int id) = 0;
+    virtual sp<IMemory> AllocMemory(int id , int size) = 0;
+    virtual status_t DumpMemory(int id, int size) = 0;
+    virtual status_t DeInit(int id) = 0;
 };
 
 class BnJune : public BnInterface<IJune>

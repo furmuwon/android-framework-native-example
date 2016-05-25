@@ -34,6 +34,8 @@ public:
         ALOGV("DemoApp()");
         mJune = 0;
         mAppDathNotification = 0;
+        id = 0;
+        memory_size = 4096;
     }
 
     virtual ~DemoApp()
@@ -54,17 +56,40 @@ public:
 
     virtual bool threadLoop()
     {
+        pid_t tid = getTid();
         while (!exitPending())
         {
-            String8 desc;
+            uint32_t* p;
             Mutex::Autolock lock(appLock);
-            mJune->Init();
-            ALOGI("June Client Init");
-            desc = mJune->GetJuneServiceDesc();
-            ALOGI("June Client GetJuneServiceDesc [%s]", desc.string());
-            mJune->DeInit(0);
+
+            id = mJune->Init();
+            ALOGI("June Client[%d] Init tid[%d, 0x%x]", id, tid, tid);
+
+            mImem = mJune->AllocMemory(id, memory_size);
+            if (mImem == 0) {
+                ALOGE("June Client[%d] failed to get memory", id);
+                mJune->DeInit(id);
+                return false;
+            }
+            p = static_cast<uint32_t*>(mImem->pointer());
+            ALOGI("June Client[%d] Getted Memory Info", id);
+            ALOGI("June Client[%d] pointer [0x%x]", id, (unsigned int)mImem->pointer());
+            ALOGI("June Client[%d] size    [%d]", id, mImem->size());
+            ALOGI("June Client[%d] offset  [%d]", id, mImem->offset());
+            ALOGI("June Client[%d] trace[0] [0x%x]", id, p[0]);
+            ALOGI("June Client[%d] trace[1] [0x%x]", id, p[1]);
+            ALOGI("June Client[%d] trace[2] [0x%x]", id, p[2]);
+            ALOGI("June Client[%d] trace[3] [0x%x]", id, p[3]);
+            p[4] = 0xaaaabbbb;
+            p[5] = 0xccccdddd;
+            p[6] = id;
+            p[7] = (unsigned int)tid;
+
+            mJune->DumpMemory(id, 40);
+
+            mJune->DeInit(id);
             ALOGI("June Client DeInit");
-            usleep(1000000); // 1s
+            usleep(5000000); // 5s
         }
 
         return false;
@@ -115,7 +140,10 @@ public:
 
     sp<IJune> mJune;
     sp<AppDathNotification> mAppDathNotification;
+    sp<IMemory> mImem;
     mutable Mutex appLock;
+    int id;
+    int memory_size;
 };
 
 int main(int argc, char** argv)
@@ -129,13 +157,12 @@ int main(int argc, char** argv)
         ALOGE("DemoApp allocation fail\n");
         return -1;
     }
-    ALOGV("Run DemoApp\n");
 
+    ALOGV("Run DemoApp\n");
     app->run(); /* call the readyTorun in _threadLoop by calling run function */
 
     ALOGV("Join DemoApp\n");
     app->join();
-
     return 0;
 }
 
