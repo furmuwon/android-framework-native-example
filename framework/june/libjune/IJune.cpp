@@ -31,6 +31,7 @@ enum {
     JUNE_INIT = IBinder::FIRST_CALL_TRANSACTION,
     JUNE_GET_DESC,
     JUNE_ALLOC_MEMORY,
+    JUNE_NEW_CONTROL_MEMORY,
     JUNE_DUMP_MEMORY,
     JUNE_DEINIT,
 };
@@ -67,6 +68,21 @@ public:
         data.writeInt32((int32_t) id);
         data.writeInt32((int32_t) size);
         status_t status = remote()->transact(JUNE_ALLOC_MEMORY, data, &reply);
+        if (status == NO_ERROR) {
+            iMem = interface_cast<IMemory>(reply.readStrongBinder());
+            return iMem;
+        } else
+            return 0;
+    }
+
+    virtual sp<IMemory> NewControlBlock(int id, int dir)
+    {
+        Parcel data, reply;
+        sp<IMemory> iMem = 0;
+        data.writeInterfaceToken(IJune::getInterfaceDescriptor());
+        data.writeInt32((int32_t) id);
+        data.writeInt32((int32_t) dir);
+        status_t status = remote()->transact(JUNE_NEW_CONTROL_MEMORY, data, &reply);
         if (status == NO_ERROR) {
             iMem = interface_cast<IMemory>(reply.readStrongBinder());
             return iMem;
@@ -152,6 +168,20 @@ status_t BnJune::onTransact(
             id = data.readInt32();
             size = data.readInt32();
             iMem = AllocMemory(id, size);
+            if (iMem == 0)
+                return NO_MEMORY;
+            else
+                reply->writeStrongBinder(iMem->asBinder());
+            return NO_ERROR;
+        } break;
+
+        case JUNE_NEW_CONTROL_MEMORY: {
+            sp<IMemory> iMem;
+            int id, dir;
+            CHECK_INTERFACE(IJune, data, reply);
+            id = data.readInt32();
+            dir = data.readInt32();
+            iMem = NewControlBlock(id, dir);
             if (iMem == 0)
                 return NO_MEMORY;
             else

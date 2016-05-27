@@ -58,13 +58,29 @@ public:
     virtual int Init(void);
     virtual String8 GetJuneServiceDesc(void);
     virtual sp<IMemory> AllocMemory(int id, int size);
+    virtual sp<IMemory> NewControlBlock(int id, int dir);
     virtual status_t DumpMemory(int id, int size);
     virtual status_t DeInit(int id);
 
+    class JuneCtlThread : public Thread {
+    public:
+        JuneCtlThread(int id, int dir, const sp<June>& june, const sp<IMemory>& ctlblk);
+        virtual ~JuneCtlThread();
+        status_t readyToRun();
+        void ReportFlag(June_control_block_t *mJScblk, uint32_t flag);
+        status_t PushData(June_control_block_t *mJScblk, uint32_t data);
+        virtual bool threadLoop();
+        const sp<June> mJunServ;
+        const sp<IMemory> mCtlImem;
+        const int mId;
+        const int mDir;
+        June_control_block_t *mJScblk;
+    };
     void LeaveTraceMemory(sp<IMemory> &iMem);
 private:
     sp<MemoryDealer> mMemoryDealer;
     DefaultKeyedVector< int, sp<IMemory> > mAllocedMemorys;
+    DefaultKeyedVector< int, sp<JuneCtlThread> > mCtlThreds;
     mutable Mutex mLock;
     int unique_id;
 

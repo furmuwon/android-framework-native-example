@@ -9,6 +9,7 @@ LOCAL_SHARED_LIBRARIES := \
 	libbinder \
 	libpjune \
 	libutils \
+	libcutils \
 	liblog
 
 LOCAL_C_INCLUDES := \

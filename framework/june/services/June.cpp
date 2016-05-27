@@ -37,6 +37,10 @@
 
 #include "June.h"
 
+extern "C" {
+#include "../private/bionic_futex.h"
+}
+
 #ifdef VERY_VERY_VERBOSE_LOGGING
 #define ALOGVV ALOGV
 #else
@@ -116,7 +120,6 @@ sp<IMemory> June::AllocMemory(int id, int size)
         id, size, (unsigned int)iMem->pointer(), iMem->offset());
 
     mMemoryDealer->dump("In AllocMemory");
-
     LeaveTraceMemory(iMem);
     mAllocedMemorys.add(id, iMem);
 
@@ -132,6 +135,63 @@ void June::LeaveTraceMemory(sp<IMemory> &iMem)
     p[2] = 0x55556666;
     p[3] = 0x77778888;
     return;
+}
+
+sp<IMemory> June::NewControlBlock(int id, int dir)
+{
+    sp<IMemory> iMem;
+    sp<JuneCtlThread> CtlThread;
+    June_control_block_t *Jcblk = NULL;
+    ssize_t index;
+    int size = sizeof(struct June_control_block_t);
+
+    Mutex::Autolock jlock(mLock);
+    ALOGV("%s", __func__);
+
+    if (mMemoryDealer == 0)
+        return 0;
+
+    index = mAllocedMemorys.indexOfKey(id);
+    if (index >= 0) {
+        iMem = mAllocedMemorys.valueFor(id);
+        ALOGW("Already NewControlBlock memory alloced id:%d, size:%d, memory point: 0x%x off:0x%x",
+            id, iMem->size(), (unsigned int)iMem->pointer(), iMem->offset());
+        return 0;
+    } else {
+        iMem = mMemoryDealer->allocate(size);
+        if (iMem == 0) {
+            ALOGE("failed to alloc id:%d, size:%d", id, size);
+            return 0;
+        }
+    }
+
+    Jcblk = static_cast<June_control_block_t *>(iMem->pointer());
+    if (Jcblk == NULL)
+        return 0;
+
+    Jcblk->magic = JUNE_CTL_MAGIC;
+    Jcblk->mDirection = dir;
+    android_atomic_release_store(0, &Jcblk->mFutex);
+    android_atomic_release_store(0, &Jcblk->mFlags);
+    android_atomic_release_store(0, &Jcblk->stack_lock);
+    android_atomic_release_store(0, &Jcblk->stack_cnt);
+
+    ALOGV("NewControlBlock Memory id:%d, size:%d, memory point: 0x%x off:0x%x",
+        id, size, (unsigned int)iMem->pointer(), iMem->offset());
+
+    CtlThread = new JuneCtlThread(id, dir, this, iMem);
+    if (CtlThread == 0) {
+        ALOGE("failed to create Control Thread id:%d", id);
+        return 0;
+    }
+
+    ALOGV("NewControlBlock Thread Ok! id:%d", id);
+
+    mAllocedMemorys.add(id, iMem);
+    mCtlThreds.add(id, CtlThread);
+    CtlThread->run();
+
+    return iMem;
 }
 
 status_t June::DumpMemory(int id, int size)
@@ -186,12 +246,20 @@ status_t June::DumpMemory(int id, int size)
     return NO_ERROR;
 }
 
-
 status_t June::DeInit(int id)
 {
     sp<IMemory> iMem;
+    sp<JuneCtlThread> CtlThread;
     Mutex::Autolock jlock(mLock);
     ALOGV("%s", __func__);
+
+    CtlThread = mCtlThreds.valueFor(id);
+    if (CtlThread != 0) {
+        CtlThread->requestExit();
+        //CtlThread->requestExitAndWait();
+        mCtlThreds.removeItem(id);
+    }
+
     iMem = mAllocedMemorys.valueFor(id);
     if (iMem != 0) {
         mAllocedMemorys.removeItem(id);
@@ -202,7 +270,137 @@ status_t June::DeInit(int id)
         //mMemoryDealer->deallocate(iMem->offset());
     }
 
+    mCtlThreds.removeItem(id);
+
+
     return NO_ERROR;
+}
+
+
+June::JuneCtlThread::JuneCtlThread(int id, int dir, const sp<June>& june, const sp<IMemory>& ctlblk)
+    : mJunServ(june), mCtlImem(ctlblk), mId(id), mDir(dir)
+{
+    mJScblk = NULL;
+}
+
+June::JuneCtlThread::~JuneCtlThread()
+{
+}
+
+status_t June::JuneCtlThread::readyToRun()
+{
+    mJScblk = static_cast<June_control_block_t *>(mCtlImem->pointer());
+    if (mJScblk == 0)
+        return NO_MEMORY;
+
+    return NO_ERROR;
+}
+
+void June::JuneCtlThread::ReportFlag(June_control_block_t *mJScblk, uint32_t flag)
+{
+    if (!(android_atomic_or(flag, &mJScblk->mFlags) & flag)) {
+        (void) __futex_syscall3(&mJScblk->mFutex, FUTEX_WAKE, 1);
+    }
+}
+
+status_t June::JuneCtlThread::PushData(June_control_block_t *Jcblk, uint32_t data)
+{
+    if (android_atomic_release_load(&Jcblk->stack_cnt) >= JUNE_CTL_DATA_MAX) {
+        ALOGE("June Server CTL Thread[id:%d] DATA FULL", mId);
+        return BAD_INDEX;
+    }
+
+    Jcblk->stack[android_atomic_release_load(&Jcblk->stack_cnt)] = data;
+    android_atomic_inc(&Jcblk->stack_cnt);
+    return NO_ERROR;
+}
+
+bool June::JuneCtlThread::threadLoop()
+{
+    status_t status = NO_ERROR;
+    int push_data_cnt;
+    struct timespec current;
+    int test_count = 8;
+    while(!exitPending()) {
+        if (mDir == SERVER_TO_CLIENT) {
+            status = NO_ERROR;
+            push_data_cnt = 0;
+            while(1) {
+                clock_gettime(CLOCK_MONOTONIC, &current);
+                if (android_atomic_release_load(&(mJScblk->stack_lock)) == 1) {
+                    ALOGV("June Server CTL Thread[id:%d] structure locking", mId);
+                    usleep(10000); // 10 msec
+                    continue;
+                }
+
+                if (test_count <= 0) {
+                    requestExit();
+                    break;
+                }
+
+                android_atomic_inc(&mJScblk->stack_lock);
+                while(1) {
+                    if (PushData(mJScblk, current.tv_sec))
+                        break;
+                    push_data_cnt++;
+                    if (PushData(mJScblk, current.tv_nsec))
+                        break;
+                    push_data_cnt++;
+                    if (PushData(mJScblk, 11112222))
+                        break;
+                    push_data_cnt++;
+                    if (PushData(mJScblk, 33334444))
+                        break;
+                    push_data_cnt++;
+                    if (PushData(mJScblk, 55556666))
+                        break;
+                    push_data_cnt++;
+                    if (PushData(mJScblk, 77778888))
+                        break;
+                    push_data_cnt++;
+                    if (PushData(mJScblk, test_count--))
+                        break;
+                    push_data_cnt++;
+                    break;
+                }
+                android_atomic_dec(&mJScblk->stack_lock);
+
+                if (push_data_cnt == 0) {
+                    usleep(3000000); // 3 sec
+                    continue;
+                }
+
+                ALOGV("June Server CTL Thread[id:%d, test_cnt:%d] push data %ld, %ld, and more",
+                                mId, test_count, current.tv_sec, current.tv_nsec);
+
+
+                android_atomic_or(JUNE_CTL_FLAG_DATA_PUSH, &mJScblk->mFlags);
+
+                // Wirte 0x1 to mFutex when data push
+                int32_t old = android_atomic_or(JUNE_CBLK_FUTEX_WAKE, &mJScblk->mFutex);
+
+                // maybe if old value was 0x0, client is sleeping, so wake up!
+                if (!(old & JUNE_CBLK_FUTEX_WAKE)) {
+                    ALOGV("June Server CTL Thread[id:%d] send to signal", mId);
+                    //ReportFlag(mJScblk, JUNE_CTL_FLAG_DATA_PUSH);
+                    android_atomic_or(JUNE_CTL_FLAG_DATA_PUSH, &mJScblk->mFlags);
+                    (void) __futex_syscall3(&mJScblk->mFutex, FUTEX_WAKE, 1);
+                    // The third parameter will wake up the count of task.
+                }
+
+                usleep(3000000); // 3 sec
+            }
+        } else {
+            ALOGW("To Be Announced");
+        }
+    }
+
+    if (status)
+        ReportFlag(mJScblk, JUNE_CTL_FLAG_UNKNOWN_ERR);
+    else
+        ReportFlag(mJScblk, JUNE_CTL_FLAG_EXIT);
+
+    return false;
 }
 
 // ----------------------------------------------------------------------------

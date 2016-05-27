@@ -29,6 +29,30 @@
 
 namespace android {
 
+#define CLIENT_TO_SERVER 0
+#define SERVER_TO_CLIENT 1
+
+#define JUNE_CBLK_FUTEX_WAKE 1
+
+#define JUNE_CTL_MAGIC 0x4A554E45
+
+#define JUNE_CTL_DATA_MAX 128
+
+#define JUNE_CTL_FLAG_DATA_PUSH        0x1
+#define JUNE_CTL_FLAG_EXIT             0x2
+#define JUNE_CTL_FLAG_UNKNOWN_ERR      0x4
+
+struct June_control_block_t
+{
+    uint32_t magic;
+    uint32_t mDirection; // Client -> Server, Server -> Client
+    volatile int32_t mFutex;
+    volatile int32_t mFlags;
+    volatile int32_t stack_lock;
+    volatile int32_t stack_cnt;
+    uint32_t stack[JUNE_CTL_DATA_MAX];
+};
+
 // ----------------------------------------------------------------------------
 class IJune : public IInterface
 {
@@ -45,6 +69,7 @@ public:
 
 	virtual int Init(void) = 0;
 	virtual String8 GetJuneServiceDesc(void) = 0;
+    virtual sp<IMemory> NewControlBlock(int id , int dir) = 0;
     virtual sp<IMemory> AllocMemory(int id , int size) = 0;
     virtual status_t DumpMemory(int id, int size) = 0;
     virtual status_t DeInit(int id) = 0;
